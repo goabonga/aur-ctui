@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Chris <goabonga@pm.me>
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  recipe:
+    name: recipe
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install the toolchain
+        run: pacman -Syu --noconfirm --needed git namcap shellcheck ncurses pkgconf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare an unprivileged build user
+        run: |
+          useradd -m builder
+          chown -R builder .
+      - name: Local source checksums
+        run: su builder -c scripts/check-sums.sh
+      - name: .SRCINFO matches the PKGBUILD
+        run: |
+          su builder -c 'makepkg --printsrcinfo > /tmp/SRCINFO'
+          diff -u .SRCINFO /tmp/SRCINFO
+      - name: shellcheck
+        run: |
+          shellcheck -s bash -e SC2034,SC2154,SC2164 PKGBUILD
+          shellcheck scripts/*.sh
+      - name: namcap
+        run: namcap PKGBUILD
+      - name: Build and test the package
+        run: su builder -c 'makepkg --force --nodeps'
