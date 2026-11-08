@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Chris <goabonga@pm.me>
+
+# Pushes the recipe to the AUR when main changes. Only the files of the
+# package are published: the workflows, scripts and tests stay on GitHub.
+
+name: publish
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    env:
+      AUR_PACKAGE: ctui
+    steps:
+      - name: Require the AUR key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::error::the AUR_SSH_PRIVATE_KEY secret is required"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - name: Configure SSH for the AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          {
+            echo "Host aur.archlinux.org"
+            echo "  IdentityFile ~/.ssh/aur"
+            echo "  User aur"
+          } >> ~/.ssh/config
+      - name: Push the package files
+        run: |
+          set -euo pipefail
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur
+          git -C aur checkout -B master
+          find aur -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          git ls-files -z |
+            grep -zv -e '^\.github/' -e '^scripts/' -e '^tests/' -e '^\.gitignore$' |
+            xargs -0 -I{} install -D -m 0644 {} "aur/{}"
+          git config --global user.name "$(git log -1 --format=%an)"
+          git config --global user.email "$(git log -1 --format=%ae)"
+          cd aur
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The AUR repository is already up to date."
+            exit 0
+          fi
+          git commit -m "$(git -C .. log -1 --format=%s)"
+          git push origin master
